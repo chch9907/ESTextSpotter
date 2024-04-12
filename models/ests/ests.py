@@ -13,6 +13,9 @@
 # Modified from Deformable DETR (https://github.com/fundamentalvision/Deformable-DETR)
 # Copyright (c) 2020 SenseTime. All Rights Reserved.
 # ------------------------------------------------------------------------
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent.parent))
 import copy
 import math
 from typing import List
@@ -36,6 +39,7 @@ from .utils import sigmoid_focal_loss, MLP
 from ..registry import MODULE_BUILD_FUNCS
 from .dn_components import prepare_for_cdn,dn_post_process
 import numpy as np
+import pickle
 
 def _bezier_to_poly(bezier):
     # bezier to polygon
@@ -49,6 +53,25 @@ def _bezier_to_poly(bezier):
     points = np.concatenate((points[:, :2], points[:, 2:]), axis=0)
     return points
 
+with open('./perception/ESTS/chn_cls_list.txt', 'rb') as fp:
+    CTLABELS = pickle.load(fp)
+
+def _decode_recognition(rec):
+    s = ''
+    for c in rec:
+        c = int(c)
+        if c < 5461:
+            s += str(chr(CTLABELS[c]))
+        elif c == 5462:
+            s += u''
+    return s
+    
+def has_cht(rec):
+    for c in rec:
+        if '\u4e00' <= c <= '\u9fff':
+            return True
+    return False
+    
 class ESTS(nn.Module):
     """ This is the Cross-Attention Detector module that performs object detection """
     def __init__(self, backbone, transformer, num_classes, num_rec_classes, num_queries, 
@@ -242,7 +265,7 @@ class ESTS(nn.Module):
         else:
             raise NotImplementedError('Unknown fix_refpoints_hw {}'.format(self.fix_refpoints_hw))
 
-    def forward(self, samples: NestedTensor, targets:List=None):
+    def forward(self, samples: NestedTensor, targets:List=None, img_name='', encode=False):
         """ The forward expects a NestedTensor, which consists of:
                - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
                - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
@@ -263,25 +286,34 @@ class ESTS(nn.Module):
         B, C, H, W = samples.shape['tensors.shape']
         srcs = []
         masks = []
+        # print('features', features)
+        # src, mask = features[2].decompose()
+        # enc_feat = src.clone().detach()
         for l, feat in enumerate(features):
             src, mask = feat.decompose()
+
             srcs.append(self.input_proj[l](src))
             masks.append(mask)
             assert mask is not None
+        # enc_feat = srcs[2].clone().detach()
+        # for src in srcs:
+        #     print('1', src.shape)  # 1, 256, 32, 32
         if self.num_feature_levels > len(srcs):
+            # print('2', self.num_feature_levels, len(srcs))
             _len_srcs = len(srcs)
             for l in range(_len_srcs, self.num_feature_levels):
                 if l == _len_srcs:
-                    src = self.input_proj[l](features[-1].tensors)
+                    src = self.input_proj[l](features[-1].tensors)  
                 else:
-                    src = self.input_proj[l](srcs[-1])
+                    src = self.input_proj[l](srcs[-1])  # 1, 256, 16, 16
+                # print(src.shape)
                 m = samples.mask
                 mask = F.interpolate(m[None].float(), size=src.shape[-2:]).to(torch.bool)[0]
                 pos_l = self.backbone[1](NestedTensor(src, mask)).to(src.dtype)
                 srcs.append(src)
                 masks.append(mask)
                 poss.append(pos_l)
-
+        enc_feat = srcs[-1].clone().detach()
         if self.dn_number > 0 or targets is not None:
             input_query_label, input_query_bbox, attn_mask, dn_meta =\
                 prepare_for_cdn(dn_args=(targets, self.dn_number, self.dn_label_noise_ratio, self.dn_box_noise_scale),
@@ -290,7 +322,8 @@ class ESTS(nn.Module):
         else:
             assert targets is None
             input_query_bbox = input_query_label = attn_mask = dn_meta = input_query_rec = None
-        hs, reference, rec_references, hs_enc, ref_enc, init_box_proposal = self.transformer(srcs, masks, input_query_bbox, poss,input_query_label,attn_mask, H, W)
+        hs_ori, hs, reference, rec_references, hs_enc, ref_enc, init_box_proposal, memory, enc_intermediate_output = self.transformer(srcs, masks, input_query_bbox, poss,input_query_label,attn_mask, H, W)
+        # outputs_class_neck = ref_enc.clone().detach()
         # In case num object=0
         hs[0]+=self.label_enc.weight[0,0]*0.0
         # deformable-detr-like anchor update
@@ -307,10 +340,13 @@ class ESTS(nn.Module):
         outputs_coord_list = torch.stack(outputs_coord_list)  
         outputs_beziers_list = torch.stack(outputs_beziers_list)        
         outputs_rec_list = torch.stack(rec_references)
-
+        # print("outputs_rec_list[-1]:", outputs_rec_list[-1].shape, outputs_rec_list[-1])
         # outputs_class = self.class_embed(hs)
         outputs_class = torch.stack([layer_cls_embed(layer_hs[:,:,0]) for
                                      layer_cls_embed, layer_hs in zip(self.class_embed, hs)])
+        
+        # print(outputs_class_neck, outputs_class_neck.shape)
+        # assert False
         if self.dn_number > 0 and dn_meta is not None:
             outputs_class, outputs_coord_list, outputs_beziers_list, outputs_rec_list = \
                 dn_post_process(outputs_class, outputs_coord_list, outputs_beziers_list, outputs_rec_list,
@@ -319,7 +355,7 @@ class ESTS(nn.Module):
         if self.aux_loss:
             out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord_list, outputs_beziers_list, outputs_rec_list)
 
-
+        # print(hs_enc.shape)  # 1, 1, 100, 256
         # for encoder output
         if hs_enc is not None:
             # prepare intermediate outputs
@@ -330,7 +366,7 @@ class ESTS(nn.Module):
 
             # prepare enc outputs
             # import ipdb; ipdb.set_trace()
-            if hs_enc.shape[0] > 1:
+            if hs_enc.shape[0] > 1:  # no execute
                 enc_outputs_coord = []
                 enc_outputs_class = []
                 for layer_id, (layer_box_embed, layer_class_embed, layer_hs_enc, layer_ref_enc) in enumerate(zip(self.enc_bbox_embed, self.enc_class_embed, hs_enc[:-1], ref_enc[:-1])):
@@ -351,9 +387,68 @@ class ESTS(nn.Module):
                 ]
 
         out['dn_meta'] = dn_meta
+        out['enc_out'] = memory #enc_feat #enc_feat #memory # enc_feat #enc_intermediate_output[-1]  # memory #
 
+        if encode:
+            out = self.get_neck_output(out, hs_ori, img_name)
         return out
+    
+    def get_neck_output(self, out, hs_ori, img_name):
+        out_logits, out_bbox = out['pred_logits'], out['pred_boxes']
+        prob = out_logits.sigmoid()
+        num_select = 100
+        thershold = 0.2
+        topk_values, topk_indexes = torch.topk(prob.view(out_logits.shape[0], -1), num_select, dim=1)
+        scores = topk_values
+        select_mask = torch.nonzero(scores.squeeze(0) > thershold).squeeze(-1)
+        # print(scores.shape, select_mask.shape)
+        # assert False
+        topk_boxes = topk_indexes // out_logits.shape[2] 
+        boxes = torch.gather(out['pred_boxes'], 1, topk_boxes.unsqueeze(-1).repeat(1,1,4))  # 1, 100, 4
+        selected_boxes = torch.index_select(boxes, 1, select_mask).squeeze(0)  # num, 4
+        
+        rec_score, rec = out['pred_rec'].softmax(-1).max(-1)
+        rec = torch.gather(rec, 1, topk_boxes.unsqueeze(-1).repeat(1,1,25))
+        selected_rec = torch.index_select(rec, 1, select_mask).squeeze(0)
+        # print(selected_rec.shape, selected_rec)
+        selected_rec = [_decode_recognition(r) for r in selected_rec]
+        # topk_boxes = int(topk_indexes / out_logits.shape[2])  # edit
+        # labels = topk_indexes % out_logits.shape[2]
+        # rec_score, rec = outputs['pred_rec'].softmax(-1).max(-1)
+        # print(hs_ori[-1][:, :, 1:].shape, topk_boxes.unsqueeze(-1).unsqueeze(-1).repeat(1,1,25, 256).shape)
+        
+        # hs_rec_topk = torch.gather(hs_ori[-1][:, :, 1:], 1, topk_boxes.unsqueeze(-1).unsqueeze(-1).repeat(1,1,25,256))
+        
+        # rec_score = torch.gather(rec_score, 1, topk_boxes.unsqueeze(-1).repeat(1,1,25))
 
+    
+        if not len(selected_boxes):
+            hs_rec_topk = hs_ori[-1][:, 0, 1:]
+            print('no detected boxes:', img_name)
+        else:
+            # areas = (selected_boxes[:, 0] - selected_boxes[:, 2]) * (selected_boxes[:, 1] - selected_boxes[:, 3])
+            areas = selected_boxes[:, 2] * selected_boxes[:, 3]
+            # print(areas)
+            is_cht = True
+            for j, rec in enumerate(selected_rec):
+                if not has_cht(rec):
+                    areas[j] = 0
+                else:
+                    is_cht = True
+                    
+            if is_cht:
+                argmax_area = torch.argmax(areas, dim=-1).item()
+            else:
+                argmax_area = 0
+            # print(argmax_area == torch.argmax(torch.index_select(scores, 1, select_mask)))
+            hs_rec_topk = torch.index_select(hs_ori[-1][:, :, :], 1, select_mask[argmax_area])
+            # boxes_topk = torch.index_select(boxes, 1, select_mask[argmax_area])
+            # print(hs_rec_topk.shape, select_mask.shape)
+        
+        out['outputs_class_neck'] = hs_rec_topk # hs_rec_topk  # [1, 100, 25, 256]
+        return out
+    
+    
     @torch.jit.unused
     def _set_aux_loss(self, outputs_class, outputs_coord, outputs_beziers_list, outputs_rec):
         # this is a workaround to make torchscript happy, as torchscript
@@ -726,16 +821,29 @@ class PostProcess(nn.Module):
         prob = out_logits.sigmoid()
         topk_values, topk_indexes = torch.topk(prob.view(out_logits.shape[0], -1), num_select, dim=1)
         scores = topk_values
-        topk_boxes = topk_indexes // out_logits.shape[2]
+        topk_boxes = topk_indexes // out_logits.shape[2] 
+        # topk_boxes = int(topk_indexes / out_logits.shape[2])  # edit
+        
         labels = topk_indexes % out_logits.shape[2]
-        if not_to_xyxy:
-            boxes = out_bbox
-        else:
-            boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
+        # print(topk_indexes.shape, out_logits.shape, labels.shape, labels)
+        # assert False
+        # print(outputs['pred_boxes'])
+        
+        # if not_to_xyxy:
+        #     boxes = out_bbox
+        #     # print('1')
+        # else:
+        #     boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
+        #     # print('2')
+        boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
 
         if test:
             assert not not_to_xyxy
             boxes[:,:,2:] = boxes[:,:,2:] - boxes[:,:,:2]
+            # print('3')
+        # print(boxes)
+        # assert False
+        
         boxes = torch.gather(boxes, 1, topk_boxes.unsqueeze(-1).repeat(1,1,4))
         rec_score, rec = outputs['pred_rec'].softmax(-1).max(-1)
         rec = torch.gather(rec, 1, topk_boxes.unsqueeze(-1).repeat(1,1,25))
@@ -747,8 +855,11 @@ class PostProcess(nn.Module):
 
         # and from relative [0, 1] to absolute [0, height] coordinates
         img_h, img_w = target_sizes.unbind(1)
+        # print(target_sizes.shape, img_h, img_w)
+        # print("before:", boxes)
         scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=1)
         boxes = boxes * scale_fct[:, None, :].cuda()
+        # print("after:", boxes)
         out_beziers = out_beziers * scale_fct[:, None, :].repeat(1,1,8).cuda()
 
         if self.nms_iou_threshold > 0:

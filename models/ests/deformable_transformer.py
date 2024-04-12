@@ -14,7 +14,7 @@
 import math, random
 import copy
 from typing import Optional
-
+import numpy as np
 from util.misc import inverse_sigmoid
 
 import torch
@@ -329,6 +329,8 @@ class DeformableTransformer(nn.Module):
                 ref_token_index=enc_topk_proposals, # bs, nq 
                 ref_token_coord=enc_refpoint_embed, # bs, nq, 4
                 )
+        # print('enc_intermediate_output:', len(enc_intermediate_output))
+        # print("enc output:", memory.shape)
         #########################################################
         # End Encoder
         # - memory: bs, \sum{hw}, c
@@ -429,7 +431,7 @@ class DeformableTransformer(nn.Module):
         #########################################################
         # Begin Decoder
         #########################################################
-        hs, references, rec_references = self.decoder(
+        hs_ori, hs, references, rec_references = self.decoder(
                 tgt=tgt.transpose(0, 1), 
                 roi_features=roi_features.transpose(0, 1),
                 memory=memory.transpose(0, 1), 
@@ -466,7 +468,7 @@ class DeformableTransformer(nn.Module):
         # ref_enc: (n_enc+1, bs, nq, query_dim) or (1, bs, nq, query_dim) or (n_enc, bs, nq, d_model) or None
         #########################################################        
 
-        return hs, references, rec_references, hs_enc, ref_enc, init_box_proposal
+        return hs_ori, hs, references, rec_references, hs_enc, ref_enc, init_box_proposal, memory, enc_intermediate_output
         # hs: (n_dec, bs, nq, d_model)
         # references: sigmoid coordinates. (n_dec+1, bs, bq, 4)
         # hs_enc: (n_enc+1, bs, nq, d_model) or (1, bs, nq, d_model) or None
@@ -577,7 +579,7 @@ class TransformerEncoder(nn.Module):
 
         # intermediate_coord = []
         # main process
-        for layer_id, layer in enumerate(self.layers):
+        for layer_id, layer in enumerate(self.layers):  # 6-layers
             # main process
             dropflag = False
             if self.enc_layer_dropout_prob is not None:
@@ -586,11 +588,11 @@ class TransformerEncoder(nn.Module):
                     dropflag = True
             
             if not dropflag:
-                if self.deformable_encoder:
+                if self.deformable_encoder:  
                     output = layer(src=output, pos=pos, reference_points=reference_points, spatial_shapes=spatial_shapes, level_start_index=level_start_index, key_padding_mask=key_padding_mask)  
                 else:
                     output = layer(src=output.transpose(0, 1), pos=pos.transpose(0, 1), key_padding_mask=key_padding_mask).transpose(0, 1)        
-
+                # print(layer_id, output.shape)
             if ((layer_id == 0 and self.two_stage_type in ['enceachlayer', 'enclayer1']) \
                 or (self.two_stage_type == 'enceachlayer')) \
                     and (layer_id != self.num_layers - 1):
@@ -604,7 +606,7 @@ class TransformerEncoder(nn.Module):
                 ref_token_coord = torch.gather(output_proposals, 1, ref_token_index.unsqueeze(-1).repeat(1, 1, 4))
 
                 output = output_memory
-
+            intermediate_output.append(output.clone().detach())
             # aux loss
             if (layer_id != self.num_layers - 1) and ref_token_index is not None:
                 out_i = torch.gather(output, 1, ref_token_index.unsqueeze(-1).repeat(1, 1, self.d_model))
@@ -615,11 +617,11 @@ class TransformerEncoder(nn.Module):
         if self.norm is not None:
             output = self.norm(output)
 
-        if ref_token_index is not None:
-            intermediate_output = torch.stack(intermediate_output) # n_enc/n_enc-1, bs, \sum{hw}, d_model
-            intermediate_ref = torch.stack(intermediate_ref)
-        else:
-            intermediate_output = intermediate_ref = None
+        # if ref_token_index is not None:
+        #     intermediate_output = torch.stack(intermediate_output) # n_enc/n_enc-1, bs, \sum{hw}, d_model
+        #     intermediate_ref = torch.stack(intermediate_ref)
+        # else:
+        #     intermediate_output = intermediate_ref = None
 
         return output, intermediate_output, intermediate_ref
 
@@ -721,6 +723,7 @@ class TransformerDecoder(nn.Module):
         tgt = torch.cat([tgt.unsqueeze(2),roi_features],2)
         output = tgt
 
+        intermediate_ori = []
         intermediate = []
         intermediate_rec = []
         reference_points = refpoints_unsigmoid.sigmoid()
@@ -838,6 +841,7 @@ class TransformerDecoder(nn.Module):
 
 
             intermediate.append(self.norm(output))
+            intermediate_ori.append(output)
             # select # tgt
             if self.dec_layer_number is not None and layer_id != self.num_layers - 1:
                 # import ipdb; ipdb.set_trace()
@@ -846,6 +850,7 @@ class TransformerDecoder(nn.Module):
 
 
         return [
+            [itm_out.transpose(0, 1) for itm_out in intermediate_ori],
             [itm_out.transpose(0, 1) for itm_out in intermediate],
             [itm_refpoint.transpose(0, 1) for itm_refpoint in ref_points],
             [itm_rec.transpose(0, 1) for itm_rec in intermediate_rec]
