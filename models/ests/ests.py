@@ -393,16 +393,13 @@ class ESTS(nn.Module):
             out = self.get_neck_output(out, hs_ori, img_name)
         return out
     
-    def get_neck_output(self, out, hs_ori, img_name):
+    def get_neck_output(self, out, hs_ori, img_name, num_select = 100, detect_thred = 0.2):
         out_logits, out_bbox = out['pred_logits'], out['pred_boxes']
         prob = out_logits.sigmoid()
-        num_select = 100
-        thershold = 0.2
+        
         topk_values, topk_indexes = torch.topk(prob.view(out_logits.shape[0], -1), num_select, dim=1)
         scores = topk_values
-        select_mask = torch.nonzero(scores.squeeze(0) > thershold).squeeze(-1)
-        # print(scores.shape, select_mask.shape)
-        # assert False
+        select_mask = torch.nonzero(scores.squeeze(0) > detect_thred).squeeze(-1)
         topk_boxes = topk_indexes // out_logits.shape[2] 
         boxes = torch.gather(out['pred_boxes'], 1, topk_boxes.unsqueeze(-1).repeat(1,1,4))  # 1, 100, 4
         selected_boxes = torch.index_select(boxes, 1, select_mask).squeeze(0)  # num, 4
@@ -410,43 +407,48 @@ class ESTS(nn.Module):
         rec_score, rec = out['pred_rec'].softmax(-1).max(-1)
         rec = torch.gather(rec, 1, topk_boxes.unsqueeze(-1).repeat(1,1,25))
         selected_rec = torch.index_select(rec, 1, select_mask).squeeze(0)
-        # print(selected_rec.shape, selected_rec)
-        selected_rec = [_decode_recognition(r) for r in selected_rec]
+    
         # topk_boxes = int(topk_indexes / out_logits.shape[2])  # edit
         # labels = topk_indexes % out_logits.shape[2]
         # rec_score, rec = outputs['pred_rec'].softmax(-1).max(-1)
         # print(hs_ori[-1][:, :, 1:].shape, topk_boxes.unsqueeze(-1).unsqueeze(-1).repeat(1,1,25, 256).shape)
-        
         # hs_rec_topk = torch.gather(hs_ori[-1][:, :, 1:], 1, topk_boxes.unsqueeze(-1).unsqueeze(-1).repeat(1,1,25,256))
-        
         # rec_score = torch.gather(rec_score, 1, topk_boxes.unsqueeze(-1).repeat(1,1,25))
 
-    
         if not len(selected_boxes):
-            hs_rec_topk = hs_ori[-1][:, 0, 1:]
-            print('no detected boxes:', img_name)
+            hs_rec_topk = hs_ori[-1][:, 0, 1]
+            # print('no detected boxes:', img_name)
         else:
-            # areas = (selected_boxes[:, 0] - selected_boxes[:, 2]) * (selected_boxes[:, 1] - selected_boxes[:, 3])
             areas = selected_boxes[:, 2] * selected_boxes[:, 3]
+            # is_cht = True
+            # decode_rec = [_decode_recognition(r) for r in selected_rec]
+            # for j, rec in enumerate(decode_rec):
+            #     if not has_cht(rec):
+            #         areas[j] = 0
+            #     else:
+            #         is_cht = True
+            # if is_cht:
+            #     argmax_area = torch.argmax(areas, dim=-1).item()
+            # else:
+            #     argmax_area = 0
             # print(areas)
-            is_cht = True
-            for j, rec in enumerate(selected_rec):
-                if not has_cht(rec):
-                    areas[j] = 0
-                else:
-                    is_cht = True
-                    
-            if is_cht:
-                argmax_area = torch.argmax(areas, dim=-1).item()
+            if areas.shape[0] == 1:
+                argmax = torch.tensor(0) 
+                argmax_list = [argmax]
             else:
-                argmax_area = 0
-            # print(argmax_area == torch.argmax(torch.index_select(scores, 1, select_mask)))
-            hs_rec_topk = torch.index_select(hs_ori[-1][:, :, :], 1, select_mask[argmax_area])
-            # boxes_topk = torch.index_select(boxes, 1, select_mask[argmax_area])
-            # print(hs_rec_topk.shape, select_mask.shape)
-        
-        out['outputs_class_neck'] = hs_rec_topk # hs_rec_topk  # [1, 100, 25, 256]
-        return out
+                argmax_list = torch.topk(areas, k=2, dim=-1)[1]
+
+            hs_rec_topk_list = []
+            for argmax in argmax_list:
+                argmax = argmax.item()
+                for start, value in enumerate(selected_rec[argmax, :]):
+                    if value == 5462:
+                        break
+                pre_hs_rec_topk = torch.index_select(hs_ori[-1][:, :, 1:start + 1], 1, select_mask[argmax])
+                hs_rec_topk = pre_hs_rec_topk.mean(-2).squeeze()
+                hs_rec_topk_list.append(hs_rec_topk)
+
+        out['outputs_class_neck'] = torch.stack(hs_rec_topk_list, dim=0) # hs_rec_topk  # [1, 100, 25, 256]
     
     
     @torch.jit.unused
