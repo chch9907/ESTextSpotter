@@ -390,7 +390,7 @@ class ESTS(nn.Module):
         out['enc_out'] = memory #enc_feat #enc_feat #memory # enc_feat #enc_intermediate_output[-1]  # memory #
 
         if encode:
-            out = self.get_neck_output(out, hs_ori, img_name)
+            out = self.get_neck_output(out, hs, img_name)
         return out
     
     def get_neck_output(self, out, hs_ori, img_name, num_select = 100, detect_thred = 0.2):
