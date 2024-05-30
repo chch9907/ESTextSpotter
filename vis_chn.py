@@ -61,7 +61,6 @@ root = '/home/user/HKUra/workspace/AnyText/test_imgs_cn/'
 prefix = 'nan_style_'
 suffix = '_raw.png'
 ori_idx = 0
-# , 'cha.png', 'quchenshi.png', 'shihegang.png', 'farm.png'
 ori_file_list = [root + item + suffix for item in [
                                             'nan', 'taichao', 'tanzai', 
                                             'leshan', 'chuannong', 'huayujie',
@@ -76,10 +75,11 @@ text_file_list = [root + prefix2 + item for item in [
                                             # 'cha.png', 'quchenshi.png', 'shihetian.png', 'farm.png'
                                             'nan_song.png', 'taichao_song.png', 'tanzai_song.png', 'leshan_song.png', 'chuannong_song.png', 'huayujie_song.png', 'cha_song.png', 'quchenshi_song.png', 'shihetian_song.png', 'farm_song.png'
                                             ]]
-image_file_list = ori_file_list + text_file_list
+# image_file_list = ori_file_list + text_file_list
+path = '/home/user/HKUra/photos/sciencepark/test_imgs2'
+image_file_list = [os.path.join(path, item) for item in os.listdir(path)]
+
 preds_neck = []
-# img_list = [Image.open(img_file).convert('RGB') for img_file in image_file_list 
-#             if os.path.exists(img_file)]
 
 img_list = []
 for idx, image_file in enumerate(image_file_list):
@@ -142,10 +142,10 @@ for idx, image in enumerate(img_list):
     preds_neck.append(raw_output['outputs_class_neck'].detach().reshape(1, -1))
     # preds_neck.append(raw_output['interm_outputs']['pred_boxSes'].detach().reshape(1, -1))
     
-    # vslzr.visualize(image, pred_dict, savedir='vis_fin_raw2')
+    vslzr.visualize(image, pred_dict, savedir='vis_fin')
     # if idx >= 12:
     #     assert False
-
+assert False
 ori_embs = preds_neck[:length] #
 # ori_embs = preds_neck[ori_idx:ori_idx + 1]
 text_embs = preds_neck[length:]
