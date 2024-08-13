@@ -390,65 +390,61 @@ class ESTS(nn.Module):
         out['enc_out'] = memory #enc_feat #enc_feat #memory # enc_feat #enc_intermediate_output[-1]  # memory #
 
         if encode:
-            out = self.get_neck_output(out, hs, img_name)
+            self.get_neck_output(out, hs)
         return out
     
-    def get_neck_output(self, out, hs_ori, img_name, num_select = 100, detect_thred = 0.2):
+    def get_neck_output(self, out, hs, num_select = 100, detect_thred = 0.2, topk=2):
         out_logits, out_bbox = out['pred_logits'], out['pred_boxes']
         prob = out_logits.sigmoid()
         
         topk_values, topk_indexes = torch.topk(prob.view(out_logits.shape[0], -1), num_select, dim=1)
         scores = topk_values
-        select_mask = torch.nonzero(scores.squeeze(0) > detect_thred).squeeze(-1)
         topk_boxes = topk_indexes // out_logits.shape[2] 
-        boxes = torch.gather(out['pred_boxes'], 1, topk_boxes.unsqueeze(-1).repeat(1,1,4))  # 1, 100, 4
-        selected_boxes = torch.index_select(boxes, 1, select_mask).squeeze(0)  # num, 4
+        select_mask = torch.nonzero(scores.squeeze(0) > detect_thred).squeeze(-1)
         
-        rec_score, rec = out['pred_rec'].softmax(-1).max(-1)
-        rec = torch.gather(rec, 1, topk_boxes.unsqueeze(-1).repeat(1,1,25))
-        selected_rec = torch.index_select(rec, 1, select_mask).squeeze(0)
+        boxes = torch.gather(out['pred_boxes'], 1, topk_boxes.unsqueeze(-1).repeat(1,1,4))  # 1, 100, 4
+        selected_boxes = torch.index_select(boxes, 1, select_mask).squeeze(0) # num, 4
+        
+        # print(scores.shape, select_mask.shape, boxes.shape)
+        rec_score, recs = out['pred_rec'].softmax(-1).max(-1)
+        recs = torch.gather(recs, 1, topk_boxes.unsqueeze(-1).repeat(1,1,25))
+        selected_rec = torch.index_select(recs, 1, select_mask).squeeze(0)
     
-        # topk_boxes = int(topk_indexes / out_logits.shape[2])  # edit
-        # labels = topk_indexes % out_logits.shape[2]
-        # rec_score, rec = outputs['pred_rec'].softmax(-1).max(-1)
-        # print(hs_ori[-1][:, :, 1:].shape, topk_boxes.unsqueeze(-1).unsqueeze(-1).repeat(1,1,25, 256).shape)
-        # hs_rec_topk = torch.gather(hs_ori[-1][:, :, 1:], 1, topk_boxes.unsqueeze(-1).unsqueeze(-1).repeat(1,1,25,256))
-        # rec_score = torch.gather(rec_score, 1, topk_boxes.unsqueeze(-1).repeat(1,1,25))
 
         if not len(selected_boxes):
-            hs_rec_topk = hs_ori[-1][:, 0, 1]
-            # print('no detected boxes:', img_name)
+            hs_rec_topk = hs[-1][:, 0, 1]
+            print('no detected boxes:')
+            out['outputs_class_neck'] = hs_rec_topk
         else:
             areas = selected_boxes[:, 2] * selected_boxes[:, 3]
-            # is_cht = True
-            # decode_rec = [_decode_recognition(r) for r in selected_rec]
-            # for j, rec in enumerate(decode_rec):
-            #     if not has_cht(rec):
-            #         areas[j] = 0
-            #     else:
-            #         is_cht = True
-            # if is_cht:
-            #     argmax_area = torch.argmax(areas, dim=-1).item()
-            # else:
-            #     argmax_area = 0
-            # print(areas)
+            is_cht_idxs = []
+            decode_rec = [_decode_recognition(r) for r in selected_rec]
+            for j, recs in enumerate(decode_rec):
+                if  has_cht(recs) or recs == '':  # '' can contain valid text features
+                    is_cht_idxs.append(j)
+            if len(is_cht_idxs):
+                is_en_idxs = [idx for idx in range(len(areas)) if idx not in is_cht_idxs]
+                areas[is_en_idxs] = 0
             if areas.shape[0] == 1:
-                argmax = torch.tensor(0) 
+                argmax = torch.tensor(0)  #torch.argmax(areas, dim=-1)
                 argmax_list = [argmax]
             else:
-                argmax_list = torch.topk(areas, k=2, dim=-1)[1]
-
+                argmax_list = torch.topk(areas, k=topk, dim=-1)[1]
+            # print(argmax_list, [decode_rec[idx] for idx in argmax_list], [areas[idx] for idx in argmax_list])
             hs_rec_topk_list = []
+            valid_value_idxs = []
             for argmax in argmax_list:
                 argmax = argmax.item()
+                if areas[argmax] == 0.:
+                    continue
                 for start, value in enumerate(selected_rec[argmax, :]):
-                    if value == 5462:
+                    if value == 5462:  # 5462 is the empty, 5461 is the blank
                         break
-                pre_hs_rec_topk = torch.index_select(hs_ori[-1][:, :, 1:start + 1], 1, select_mask[argmax])
+                pre_hs_rec_topk = torch.index_select(hs[-1], 1, select_mask[argmax])
+                pre_hs_rec_topk = pre_hs_rec_topk[:, :, 1:start+1]
                 hs_rec_topk = pre_hs_rec_topk.mean(-2).squeeze()
-                hs_rec_topk_list.append(hs_rec_topk)
-
-        out['outputs_class_neck'] = torch.stack(hs_rec_topk_list, dim=0) # hs_rec_topk  # [1, 100, 25, 256]
+                hs_rec_topk_list.append(hs_rec_topk.clone())
+            out['outputs_class_neck'] = torch.stack(hs_rec_topk_list, dim=0)
     
     
     @torch.jit.unused
@@ -827,24 +823,11 @@ class PostProcess(nn.Module):
         # topk_boxes = int(topk_indexes / out_logits.shape[2])  # edit
         
         labels = topk_indexes % out_logits.shape[2]
-        # print(topk_indexes.shape, out_logits.shape, labels.shape, labels)
-        # assert False
-        # print(outputs['pred_boxes'])
-        
-        # if not_to_xyxy:
-        #     boxes = out_bbox
-        #     # print('1')
-        # else:
-        #     boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
-        #     # print('2')
         boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
 
         if test:
             assert not not_to_xyxy
             boxes[:,:,2:] = boxes[:,:,2:] - boxes[:,:,:2]
-            # print('3')
-        # print(boxes)
-        # assert False
         
         boxes = torch.gather(boxes, 1, topk_boxes.unsqueeze(-1).repeat(1,1,4))
         rec_score, rec = outputs['pred_rec'].softmax(-1).max(-1)
@@ -867,7 +850,7 @@ class PostProcess(nn.Module):
         if self.nms_iou_threshold > 0:
             item_indices = [nms(b, s, iou_threshold=self.nms_iou_threshold) for b,s in zip(boxes, scores)]
             # import ipdb; ipdb.set_trace()
-            results = [{'scores': s[i], 'labels': l[i], 'boxes': b[i], 'beziers': bz[i], 'rec': r[i], 'rec_score': r_s[i], 'rec_prob': r_p[i]} for s, l, b, bz, r, r_s, i in zip(scores, labels, boxes, out_beziers, rec, rec_score, rec_prob, item_indices)]
+            results = [{'scores': s[i], 'labels': l[i], 'boxes': b[i], 'beziers': bz[i], 'rec': r[i], 'rec_score': r_s[i], 'rec_prob': r_p[i]} for s, l, b, bz, r, r_s, r_p, i in zip(scores, labels, boxes, out_beziers, rec, rec_score, rec_prob, item_indices)]
         else:
             results = [{'scores': s, 'labels': l, 'boxes': b, 'beziers': bz, 'rec': r, 'rec_score': r_s, 'rec_prob': r_p} for s, l, b, bz, r, r_s, r_p in zip(scores, labels, boxes, out_beziers, rec, rec_score, rec_prob)]
 
