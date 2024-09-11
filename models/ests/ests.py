@@ -53,7 +53,7 @@ def _bezier_to_poly(bezier):
     points = np.concatenate((points[:, :2], points[:, 2:]), axis=0)
     return points
 
-with open('./perception/ESTS/chn_cls_list.txt', 'rb') as fp:
+with open('scene_understand/ESTextSpotter/chn_cls_list.txt', 'rb') as fp:
     CTLABELS = pickle.load(fp)
 
 def _decode_recognition(rec):
