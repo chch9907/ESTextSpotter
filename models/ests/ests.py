@@ -53,8 +53,16 @@ def _bezier_to_poly(bezier):
     points = np.concatenate((points[:, :2], points[:, 2:]), axis=0)
     return points
 
-with open('./perception/ESTS/chn_cls_list.txt', 'rb') as fp:
+#*========================== modification ====================================#
+with open('scene_understand/ESTextSpotter/chn_cls_list.txt', 'rb') as fp:
     CTLABELS = pickle.load(fp)
+    
+def has_cht(rec):
+    for c in rec:
+        if '\u4e00' <= c <= '\u9fff':
+            return True
+    return False
+#*============================================================================#
 
 def _decode_recognition(rec):
     s = ''
@@ -66,11 +74,6 @@ def _decode_recognition(rec):
             s += u''
     return s
     
-def has_cht(rec):
-    for c in rec:
-        if '\u4e00' <= c <= '\u9fff':
-            return True
-    return False
     
 class ESTS(nn.Module):
     """ This is the Cross-Attention Detector module that performs object detection """
@@ -431,7 +434,7 @@ class ESTS(nn.Module):
                 hs_rec_topk = pre_hs_rec_topk.mean(-2).squeeze()
                 hs_rec_topk_list.append(hs_rec_topk.clone())
             out['outputs_class_neck'] = torch.stack(hs_rec_topk_list, dim=0)
-    
+    #*============================================================================#
     
     @torch.jit.unused
     def _set_aux_loss(self, outputs_class, outputs_coord, outputs_beziers_list, outputs_rec):
@@ -835,7 +838,8 @@ class PostProcess(nn.Module):
             results = [{'scores': s, 'labels': l, 'boxes': b, 'beziers': bz, 'rec': r, 'rec_score': r_s, 'rec_prob': r_p} for s, l, b, bz, r, r_s, r_p in zip(scores, labels, boxes, out_beziers, rec, rec_score, rec_prob)]
 
         return results
-
+    #*============================================================================#
+    
 @MODULE_BUILD_FUNCS.registe_with_name(module_name='ests')
 def build_ests(args):
     # the `num_classes` naming here is somewhat misleading.
