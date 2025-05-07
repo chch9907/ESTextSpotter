@@ -329,8 +329,6 @@ class DeformableTransformer(nn.Module):
                 ref_token_index=enc_topk_proposals, # bs, nq 
                 ref_token_coord=enc_refpoint_embed, # bs, nq, 4
                 )
-        # print('enc_intermediate_output:', len(enc_intermediate_output))
-        # print("enc output:", memory.shape)
         #########################################################
         # End Encoder
         # - memory: bs, \sum{hw}, c

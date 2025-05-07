@@ -53,7 +53,7 @@ def _bezier_to_poly(bezier):
     points = np.concatenate((points[:, :2], points[:, 2:]), axis=0)
     return points
 
-with open('scene_understand/ESTextSpotter/chn_cls_list.txt', 'rb') as fp:
+with open('./perception/ESTS/chn_cls_list.txt', 'rb') as fp:
     CTLABELS = pickle.load(fp)
 
 def _decode_recognition(rec):
@@ -265,7 +265,7 @@ class ESTS(nn.Module):
         else:
             raise NotImplementedError('Unknown fix_refpoints_hw {}'.format(self.fix_refpoints_hw))
 
-    def forward(self, samples: NestedTensor, targets:List=None, img_name='', encode=False):
+    def forward(self, samples: NestedTensor, targets:List=None, encode=False):
         """ The forward expects a NestedTensor, which consists of:
                - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
                - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
@@ -286,27 +286,20 @@ class ESTS(nn.Module):
         B, C, H, W = samples.shape['tensors.shape']
         srcs = []
         masks = []
-        # print('features', features)
-        # src, mask = features[2].decompose()
-        # enc_feat = src.clone().detach()
         for l, feat in enumerate(features):
             src, mask = feat.decompose()
 
             srcs.append(self.input_proj[l](src))
             masks.append(mask)
             assert mask is not None
-        # enc_feat = srcs[2].clone().detach()
-        # for src in srcs:
-        #     print('1', src.shape)  # 1, 256, 32, 32
+
         if self.num_feature_levels > len(srcs):
-            # print('2', self.num_feature_levels, len(srcs))
             _len_srcs = len(srcs)
             for l in range(_len_srcs, self.num_feature_levels):
                 if l == _len_srcs:
                     src = self.input_proj[l](features[-1].tensors)  
                 else:
                     src = self.input_proj[l](srcs[-1])  # 1, 256, 16, 16
-                # print(src.shape)
                 m = samples.mask
                 mask = F.interpolate(m[None].float(), size=src.shape[-2:]).to(torch.bool)[0]
                 pos_l = self.backbone[1](NestedTensor(src, mask)).to(src.dtype)
@@ -323,7 +316,7 @@ class ESTS(nn.Module):
             assert targets is None
             input_query_bbox = input_query_label = attn_mask = dn_meta = input_query_rec = None
         hs_ori, hs, reference, rec_references, hs_enc, ref_enc, init_box_proposal, memory, enc_intermediate_output = self.transformer(srcs, masks, input_query_bbox, poss,input_query_label,attn_mask, H, W)
-        # outputs_class_neck = ref_enc.clone().detach()
+
         # In case num object=0
         hs[0]+=self.label_enc.weight[0,0]*0.0
         # deformable-detr-like anchor update
@@ -340,13 +333,10 @@ class ESTS(nn.Module):
         outputs_coord_list = torch.stack(outputs_coord_list)  
         outputs_beziers_list = torch.stack(outputs_beziers_list)        
         outputs_rec_list = torch.stack(rec_references)
-        # print("outputs_rec_list[-1]:", outputs_rec_list[-1].shape, outputs_rec_list[-1])
-        # outputs_class = self.class_embed(hs)
         outputs_class = torch.stack([layer_cls_embed(layer_hs[:,:,0]) for
                                      layer_cls_embed, layer_hs in zip(self.class_embed, hs)])
         
-        # print(outputs_class_neck, outputs_class_neck.shape)
-        # assert False
+
         if self.dn_number > 0 and dn_meta is not None:
             outputs_class, outputs_coord_list, outputs_beziers_list, outputs_rec_list = \
                 dn_post_process(outputs_class, outputs_coord_list, outputs_beziers_list, outputs_rec_list,
@@ -355,7 +345,6 @@ class ESTS(nn.Module):
         if self.aux_loss:
             out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord_list, outputs_beziers_list, outputs_rec_list)
 
-        # print(hs_enc.shape)  # 1, 1, 100, 256
         # for encoder output
         if hs_enc is not None:
             # prepare intermediate outputs
@@ -378,21 +367,20 @@ class ESTS(nn.Module):
                     enc_outputs_coord.append(layer_enc_outputs_coord)
                     enc_outputs_class.append(layer_enc_outputs_class)
 
-                # enc_delta_unsig = self.enc_bbox_embed(hs_enc[:-1])
-                # enc_outputs_unsig = enc_delta_unsig + ref_enc[:-1]
-                # enc_outputs_coord = enc_outputs_unsig.sigmoid()
-                # enc_outputs_class = self.enc_class_embed(hs_enc[:-1])
                 out['enc_outputs'] = [
                     {'pred_logits': a, 'pred_boxes': b} for a, b in zip(enc_outputs_class, enc_outputs_coord)
                 ]
 
         out['dn_meta'] = dn_meta
-        out['enc_out'] = memory #enc_feat #enc_feat #memory # enc_feat #enc_intermediate_output[-1]  # memory #
+        out['enc_out'] = memory
 
+        #* modification
         if encode:
             self.get_neck_output(out, hs)
         return out
     
+    
+    #*========================== modification ====================================#
     def get_neck_output(self, out, hs, num_select = 100, detect_thred = 0.2, topk=2):
         out_logits, out_bbox = out['pred_logits'], out['pred_boxes']
         prob = out_logits.sigmoid()
@@ -405,7 +393,6 @@ class ESTS(nn.Module):
         boxes = torch.gather(out['pred_boxes'], 1, topk_boxes.unsqueeze(-1).repeat(1,1,4))  # 1, 100, 4
         selected_boxes = torch.index_select(boxes, 1, select_mask).squeeze(0) # num, 4
         
-        # print(scores.shape, select_mask.shape, boxes.shape)
         rec_score, recs = out['pred_rec'].softmax(-1).max(-1)
         recs = torch.gather(recs, 1, topk_boxes.unsqueeze(-1).repeat(1,1,25))
         selected_rec = torch.index_select(recs, 1, select_mask).squeeze(0)
@@ -426,11 +413,10 @@ class ESTS(nn.Module):
                 is_en_idxs = [idx for idx in range(len(areas)) if idx not in is_cht_idxs]
                 areas[is_en_idxs] = 0
             if areas.shape[0] == 1:
-                argmax = torch.tensor(0)  #torch.argmax(areas, dim=-1)
+                argmax = torch.tensor(0)
                 argmax_list = [argmax]
             else:
                 argmax_list = torch.topk(areas, k=topk, dim=-1)[1]
-            # print(argmax_list, [decode_rec[idx] for idx in argmax_list], [areas[idx] for idx in argmax_list])
             hs_rec_topk_list = []
             valid_value_idxs = []
             for argmax in argmax_list:
@@ -801,6 +787,7 @@ class PostProcess(nn.Module):
         self.num_select = num_select
         self.nms_iou_threshold = nms_iou_threshold
 
+    #*========================== modification ====================================#
     @torch.no_grad()
     def forward(self, outputs, target_sizes, not_to_xyxy=False, test=False):
         """ Perform the computation
@@ -820,7 +807,6 @@ class PostProcess(nn.Module):
         topk_values, topk_indexes = torch.topk(prob.view(out_logits.shape[0], -1), num_select, dim=1)
         scores = topk_values
         topk_boxes = topk_indexes // out_logits.shape[2] 
-        # topk_boxes = int(topk_indexes / out_logits.shape[2])  # edit
         
         labels = topk_indexes % out_logits.shape[2]
         boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
@@ -837,19 +823,13 @@ class PostProcess(nn.Module):
 
         rec_prob = outputs['pred_rec'].softmax(-1)
         rec_prob = torch.gather(rec_prob, 1, topk_boxes.unsqueeze(-1).unsqueeze(-1).repeat(1,1,25,97))
-
-        # and from relative [0, 1] to absolute [0, height] coordinates
         img_h, img_w = target_sizes.unbind(1)
-        # print(target_sizes.shape, img_h, img_w)
-        # print("before:", boxes)
         scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=1)
         boxes = boxes * scale_fct[:, None, :].cuda()
-        # print("after:", boxes)
         out_beziers = out_beziers * scale_fct[:, None, :].repeat(1,1,8).cuda()
 
         if self.nms_iou_threshold > 0:
             item_indices = [nms(b, s, iou_threshold=self.nms_iou_threshold) for b,s in zip(boxes, scores)]
-            # import ipdb; ipdb.set_trace()
             results = [{'scores': s[i], 'labels': l[i], 'boxes': b[i], 'beziers': bz[i], 'rec': r[i], 'rec_score': r_s[i], 'rec_prob': r_p[i]} for s, l, b, bz, r, r_s, r_p, i in zip(scores, labels, boxes, out_beziers, rec, rec_score, rec_prob, item_indices)]
         else:
             results = [{'scores': s, 'labels': l, 'boxes': b, 'beziers': bz, 'rec': r, 'rec_score': r_s, 'rec_prob': r_p} for s, l, b, bz, r, r_s, r_p in zip(scores, labels, boxes, out_beziers, rec, rec_score, rec_prob)]
